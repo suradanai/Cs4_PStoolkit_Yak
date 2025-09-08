@@ -133,6 +133,12 @@ class PatternSearchApp(QMainWindow):
         monitor_btn.setStyleSheet(self.get_tool_button_style("#9b59b6"))
         tools_layout.addWidget(monitor_btn)
         
+        # Safety status button
+        safety_btn = QPushButton("🛡️ ตรวจสอบสถานะความปลอดภัย")
+        safety_btn.clicked.connect(self.show_safety_status)
+        safety_btn.setStyleSheet(self.get_tool_button_style("#e74c3c"))
+        tools_layout.addWidget(safety_btn)
+        
         layout.addLayout(tools_layout)
         
         # Status
@@ -223,6 +229,71 @@ class PatternSearchApp(QMainWindow):
                 QMessageBox.information(self, "Info", f"Firmware Monitor started for:\n{dir_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to launch firmware monitor:\n{str(e)}")
+    
+    def start_monitoring_if_available(self):
+        """เริ่ม monitoring อัตโนมัติถ้ามีการตั้งค่าไว้"""
+        try:
+            # ตรวจสอบว่ามี script สำหรับ monitoring หรือไม่
+            monitor_script = Path(__file__).parent / "start_monitoring.sh"
+            if monitor_script.exists():
+                print("[AUTO_MONITOR] พบสคริปต์ monitoring - กำลังเริ่มต้น...")
+                import subprocess
+                subprocess.Popen(["bash", str(monitor_script)], 
+                               cwd=str(Path(__file__).parent))
+        except Exception as e:
+            print(f"[AUTO_MONITOR] ไม่สามารถเริ่ม monitoring ได้: {e}")
+    
+    def check_system_safety(self):
+        """ตรวจสอบความปลอดภัยของระบบ"""
+        safety_status = {
+            'backup_system': False,
+            'integrity_checker': False,
+            'monitor_system': False,
+            'recovery_tools': False
+        }
+        
+        # ตรวจสอบเครื่องมือต่างๆ
+        tools = {
+            'firmware_integrity_checker.py': 'integrity_checker',
+            'firmware_monitor.py': 'monitor_system',
+            'pattern_search_fixer.py': 'recovery_tools'
+        }
+        
+        base_path = Path(__file__).parent
+        for tool_file, status_key in tools.items():
+            if (base_path / tool_file).exists():
+                safety_status[status_key] = True
+        
+        # ตรวจสอบระบบ backup ในโค้ด
+        try:
+            from core.pattern_engine import EnhancedPatternMatcher
+            matcher = EnhancedPatternMatcher()
+            if hasattr(matcher, 'create_backup_with_metadata'):
+                safety_status['backup_system'] = True
+        except:
+            pass
+            
+        return safety_status
+    
+    def show_safety_status(self):
+        """แสดงสถานะความปลอดภัย"""
+        status = self.check_system_safety()
+        
+        message = "🛡️ สถานะระบบความปลอดภัย:\n\n"
+        status_icons = {True: "✅", False: "❌"}
+        
+        message += f"{status_icons[status['backup_system']]} ระบบสำรอง (Backup System)\n"
+        message += f"{status_icons[status['integrity_checker']]} ตรวจสอบความสมบูรณ์ (Integrity Checker)\n"
+        message += f"{status_icons[status['monitor_system']]} ระบบตรวจสอบ (Monitor System)\n"
+        message += f"{status_icons[status['recovery_tools']]} เครื่องมือกู้คืน (Recovery Tools)\n"
+        
+        all_safe = all(status.values())
+        if all_safe:
+            message += "\n🎉 ระบบปลอดภัยครบถ้วน พร้อมใช้งาน!"
+        else:
+            message += "\n⚠️ ระบบความปลอดภัยไม่ครบถ้วน - ใช้งานด้วยความระวัง"
+        
+        QMessageBox.information(self, "สถานะความปลอดภัย", message)
 
 def main():
     """Main application entry point"""

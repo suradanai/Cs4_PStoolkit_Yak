@@ -19,6 +19,9 @@ import re
 import binascii
 import time
 import codecs
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from uboot_safety_system import UBootEnvironmentAnalyzer, KernelEntryPointProtector
 import hashlib
 from typing import List, Dict, Tuple, Optional, Any
 from PySide6.QtWidgets import *
@@ -302,13 +305,13 @@ class EnhancedPatternMatcher:
         return results
 
     def safe_replace_in_file(self, file_path: str, old_value: str, new_value: str, create_backup: bool = True) -> Tuple[bool, str]:
-        """Safely replace a single occurrence in a file.
+        """แทนที่ข้อมูลในไฟล์อย่างปลอดภัย - ปรับปรุงเพื่อป้องกัน firmware เสียหาย
 
-        - Detects binary vs text by trying to decode as utf-8.
-        - For binary files expects old_value and new_value to be hex strings (no 0x prefix).
-          Replacement is allowed only when new bytes and old bytes have the same length.
-        - For text files does a single replacement (first occurrence) using utf-8.
-        Returns (True, backup_path) on success or (False, error_message) on failure.
+        - ตรวจสอบไฟล์ binary vs text อย่างละเอียด
+        - สำหรับไฟล์ binary: ต้องใช้ hex strings และความยาวเท่ากันเท่านั้น
+        - สำหรับไฟล์ text: แทนที่ครั้งแรกที่เจอด้วย utf-8
+        - เพิ่มการตรวจสอบ checksum และ critical areas
+        Returns (True, backup_path) หรือ (False, error_message)
         """
         try:
             print(f"[SAFE_REPLACE] Starting safe replacement in: {file_path}")
@@ -322,17 +325,50 @@ class EnhancedPatternMatcher:
             original_hash = hashlib.sha256(data).hexdigest()
             print(f"[SAFE_REPLACE] Original hash: {original_hash[:16]}...")
 
-            # Improved binary detection
+            # ตรวจสอบประเภทไฟล์และความเสี่ยง
             is_text = self._is_likely_text_file(data, file_path)
-            print(f"[SAFE_REPLACE] File detected as: {'text' if is_text else 'binary'}")
+            is_firmware = self._is_firmware_file(file_path)
+            print(f"[SAFE_REPLACE] ประเภทไฟล์: {'text' if is_text else 'binary'}")
+            print(f"[SAFE_REPLACE] ไฟล์ firmware: {'ใช่' if is_firmware else 'ไม่'}")
 
-            # Prepare backup if requested
+            # ตรวจสอบก่อนการแก้ไข
+            validation = self.validate_firmware_before_edit(file_path)
+            if validation['warnings']:
+                print(f"[FIRMWARE_VALIDATION] เตือน: {'; '.join(validation['warnings'])}")
+            
+            # ตรวจสอบพื้นที่วิกฤต
+            try:
+                if is_text:
+                    old_bytes = old_value.encode('utf-8')
+                else:
+                    try:
+                        old_bytes = binascii.unhexlify(old_value) if len(old_value) % 2 == 0 else old_value.encode('utf-8')
+                    except:
+                        old_bytes = old_value.encode('utf-8')
+                
+                critical_check = self.check_critical_areas(data, old_bytes)
+            except Exception as e:
+                print(f"[CRITICAL_CHECK_ERROR] ไม่สามารถตรวจสอบพื้นที่วิกฤตได้: {e}")
+                critical_check = {'risk_level': 'unknown', 'warnings': ['ไม่สามารถตรวจสอบพื้นที่วิกฤตได้']}
+            if critical_check['risk_level'] == 'critical':
+                print(f"[CRITICAL] 🚨 พบการแก้ไขในพื้นที่วิกฤต!")
+                for warning in critical_check['warnings']:
+                    print(f"[CRITICAL] {warning}")
+
+            # เตือนความเสี่ยงสำหรับไฟล์ firmware
+            if is_firmware:
+                print(f"[WARNING] ⚠️ กำลังแก้ไขไฟล์ firmware - ระวังอุปกรณ์อาจบูตไม่ขึ้น!")
+                # ตรวจสอบว่าเป็นการแก้ไขในส่วน critical หรือไม่
+                if self._is_critical_firmware_area(data, old_value):
+                    print(f"[CRITICAL] 🚨 การแก้ไขในพื้นที่เสี่ยง - อาจทำให้อุปกรณ์เสียหาย!")
+
+            # สร้างไฟล์สำรอง
             backup_path = None
             if create_backup:
                 backup_path = file_path + '.backup.' + str(int(time.time()))
                 with open(backup_path, 'wb') as bf:
                     bf.write(data)
-                print(f"[SAFE_REPLACE] Backup created: {backup_path}")
+                print(f"[SAFE_REPLACE] สร้างไฟล์สำรองแล้ว: {backup_path}")
 
             if not is_text:
                     # Binary path: prefer hex strings, but allow ASCII/UTF-8 fallback
@@ -378,20 +414,31 @@ class EnhancedPatternMatcher:
 
                     new_data = data.replace(old_bytes, new_bytes, 1)
                     
-                    # Verify replacement didn't change file size for binary files
+                    # ตรวจสอบว่าขนาดไฟล์ไม่เปลี่ยน (สำคัญมากสำหรับ firmware)
                     if len(new_data) != len(data):
-                        return False, f"Binary replacement changed file size from {len(data)} to {len(new_data)} bytes"
+                        return False, f"❌ ขนาดไฟล์เปลี่ยนจาก {len(data)} เป็น {len(new_data)} bytes - อันตรายสำหรับ firmware!"
                     
-                    # Write new data
+                    # ตรวจสอบ checksum ก่อนเขียน (สำหรับไฟล์ firmware)
+                    if is_firmware:
+                        original_checksum = hashlib.md5(data).hexdigest()
+                        new_checksum = hashlib.md5(new_data).hexdigest()
+                        print(f"[FIRMWARE_CHECK] Checksum เดิม: {original_checksum[:8]}...")
+                        print(f"[FIRMWARE_CHECK] Checksum ใหม่: {new_checksum[:8]}...")
+                    
+                    # เขียนข้อมูลใหม่
                     with open(file_path, 'wb') as f:
                         f.write(new_data)
 
-                    # Verify file integrity after write
+                    # ตรวจสอบความสมบูรณ์หลังเขียน
                     actual_size = os.path.getsize(file_path)
                     if actual_size != original_size:
-                        print(f"[SAFE_REPLACE] WARNING: File size changed from {original_size} to {actual_size}")
+                        print(f"[SAFE_REPLACE] ⚠️ เตือน: ขนาดไฟล์เปลี่ยนจาก {original_size} เป็น {actual_size}")
+                        if is_firmware:
+                            print(f"[FIRMWARE_ERROR] 🚨 firmware มีปัญหา - อาจบูตไม่ขึ้น!")
                     else:
-                        print(f"[SAFE_REPLACE] SUCCESS: File size maintained at {actual_size:,} bytes")
+                        print(f"[SAFE_REPLACE] ✅ สำเร็จ: ขนาดไฟล์คงที่ {actual_size:,} bytes")
+                        if is_firmware:
+                            print(f"[FIRMWARE_OK] ✅ firmware ผ่านการตรวจสอบเบื้องต้น")
 
                     return True, backup_path or ""
 
@@ -420,6 +467,110 @@ class EnhancedPatternMatcher:
 
         except Exception as e:
             return False, f"Safe replace failed: {e}"
+    
+    def _is_firmware_file(self, file_path: str) -> bool:
+        """ตรวจสอบว่าเป็นไฟล์ firmware หรือไม่"""
+        firmware_extensions = ['.bin', '.img', '.rom', '.fw', '.uimage']
+        firmware_keywords = ['firmware', 'uboot', 'bootloader', 'kernel', 'rootfs', 'flash']
+        
+        # ตรวจสอบนามสกุลไฟล์
+        file_extension = os.path.splitext(file_path)[1].lower()
+        if file_extension in firmware_extensions:
+            return True
+            
+        # ตรวจสอบชื่อไฟล์
+        filename_lower = os.path.basename(file_path).lower()
+        return any(keyword in filename_lower for keyword in firmware_keywords)
+    
+    def _is_critical_firmware_area(self, data: bytes, search_value: str) -> bool:
+        """ตรวจสอบว่าการแก้ไขอยู่ในพื้นที่เสี่ยงของ firmware หรือไม่"""
+        try:
+            # ตรวจสอบ magic signatures ที่สำคัญ
+            critical_signatures = [
+                b'\x27\x05\x19\x56',  # U-Boot legacy image magic
+                b'\xd0\x0d\xfe\xed',  # Device tree magic  
+                b'\x1f\x8b\x08',      # Gzip magic
+                b'ANDROID!',          # Android boot image
+                b'CHROMEOS',          # Chrome OS
+            ]
+            
+            # หาตำแหน่งที่จะแก้ไข
+            if isinstance(search_value, str):
+                try:
+                    search_bytes = binascii.unhexlify(search_value)
+                except:
+                    search_bytes = search_value.encode('utf-8')
+            
+            pos = data.find(search_bytes)
+            if pos == -1:
+                return False
+                
+            # ตรวจสอบว่าใกล้ critical signatures หรือไม่
+            for signature in critical_signatures:
+                sig_pos = data.find(signature)
+                if sig_pos != -1 and abs(pos - sig_pos) < 1024:  # ใกล้กัน 1KB
+                    return True
+                    
+            # ตรวจสอบว่าอยู่ในส่วนต้นไฟล์ (bootloader area)
+            if pos < 0x10000:  # 64KB แรก
+                return True
+                
+            return False
+            
+        except Exception:
+            return False  # ถ้าไม่แน่ใจให้ถือว่าไม่เสี่ยง
+    
+    def analyze_firmware_integrity(self, file_path: str) -> Dict[str, Any]:
+        """วิเคราะห์ความสมบูรณ์ของไฟล์ firmware"""
+        try:
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            
+            analysis = {
+                'file_size': len(data),
+                'md5': hashlib.md5(data).hexdigest(),
+                'sha256': hashlib.sha256(data).hexdigest(),
+                'magic_signatures': [],
+                'suspicious_areas': [],
+                'is_firmware': self._is_firmware_file(file_path)
+            }
+            
+            # ตรวจหา magic signatures
+            signatures = [
+                (b'\x27\x05\x19\x56', 'U-Boot Legacy Image'),
+                (b'\xd0\x0d\xfe\xed', 'Device Tree'),
+                (b'\x1f\x8b\x08', 'Gzip Compressed'),
+                (b'ANDROID!', 'Android Boot Image'),  
+                (b'CHROMEOS', 'Chrome OS'),
+                (b'UBI#', 'UBI File System'),
+                (b'hsqs', 'SquashFS'),
+            ]
+            
+            for signature, name in signatures:
+                pos = data.find(signature)
+                if pos != -1:
+                    analysis['magic_signatures'].append({
+                        'name': name,
+                        'position': f'0x{pos:X}',
+                        'hex': signature.hex().upper()
+                    })
+            
+            # ตรวจหาพื้นที่น่าสงสัย (null bytes มากเกินไป)
+            chunk_size = 1024
+            for i in range(0, len(data), chunk_size):
+                chunk = data[i:i+chunk_size]
+                null_ratio = chunk.count(b'\x00') / len(chunk)
+                if null_ratio > 0.9:  # มี null bytes มากกว่า 90%
+                    analysis['suspicious_areas'].append({
+                        'offset': f'0x{i:X}',
+                        'size': len(chunk),
+                        'null_ratio': f'{null_ratio:.1%}'
+                    })
+            
+            return analysis
+        
+        except Exception as e:
+            return {'error': str(e)}
     
     def _is_likely_text_file(self, data: bytes, file_path: str) -> bool:
         """ตรวจสอบว่าไฟล์น่าจะเป็น text หรือ binary"""
@@ -458,6 +609,228 @@ class EnhancedPatternMatcher:
             pass
             
         return False
+    
+    def check_critical_areas(self, content: bytes, old_pattern: bytes) -> Dict[str, Any]:
+        """ตรวจสอบพื้นที่วิกฤตใน firmware ที่ไม่ควรแก้ไข - Enhanced Version"""
+        # ตรวจสอบ input parameters
+        if content is None:
+            return {
+                'risk_level': 'high',
+                'warnings': ['ไม่สามารถอ่านข้อมูลไฟล์เพื่อตรวจสอบพื้นที่วิกฤต'],
+                'pattern_count': 0,
+                'positions': []
+            }
+        
+        if old_pattern is None:
+            return {
+                'risk_level': 'low',
+                'warnings': [],
+                'pattern_count': 0,
+                'positions': []
+            }
+        
+        # 🔥 เพิ่มการตรวจสอบ U-Boot Environment
+        try:
+            if hasattr(self, 'uboot_analyzer'):
+                uboot_envs = self.uboot_analyzer.scan_uboot_env("temp_file.bin", max_search=len(content))
+                if uboot_envs:
+                    print(f"[UBOOT_SCAN] พบ {len(uboot_envs)} U-Boot environment blocks")
+                    for env in uboot_envs[:3]:  # ตรวจสอบ 3 อันดับแรก
+                        safety_analysis = self.uboot_analyzer.analyze_boot_safety(env)
+                        if not safety_analysis['safe_to_edit']:
+                            return {
+                                'risk_level': 'critical',
+                                'warnings': [
+                                    f"🚨 U-Boot Environment มีความเสี่ยงสูง!",
+                                    f"📍 ตำแหน่ง: 0x{env['offset']:X}",
+                                ] + safety_analysis['critical_risks'] + safety_analysis['warnings'],
+                                'pattern_count': 0,
+                                'positions': [],
+                                'uboot_critical': True
+                            }
+        except Exception as e:
+            print(f"[UBOOT_CHECK] Warning: {e}")
+        
+        # 🔥 เพิ่มการตรวจสอบ Kernel Entry Points  
+        try:
+            if hasattr(self, 'kernel_protector'):
+                kernel_check = self.kernel_protector.check_kernel_areas(content, old_pattern)
+                if kernel_check['risk_level'] == 'critical':
+                    return {
+                        'risk_level': 'critical',
+                        'warnings': [
+                            f"🚨 การแก้ไขใกล้ Kernel Entry Points!",
+                            f"🎯 พื้นที่ kernel ที่ได้รับผลกระทบ: {kernel_check['kernel_areas_affected']}"
+                        ] + kernel_check['warnings'],
+                        'pattern_count': len(kernel_check['positions']),
+                        'positions': kernel_check['positions'],
+                        'kernel_critical': True
+                    }
+        except Exception as e:
+            print(f"[KERNEL_CHECK] Warning: {e}")
+        
+        critical_zones = {
+            'bootloader': {'start': 0, 'end': 0x1000, 'description': 'บูตโหลดเดอร์'},
+            'partition_table': {'start': 0x8000, 'end': 0x9000, 'description': 'ตารางพาร์ติชั่น'},
+            'nvs': {'start': 0x9000, 'end': 0xF000, 'description': 'พื้นที่เก็บข้อมูลระบบ'},
+            'otadata': {'start': 0xD000, 'end': 0xE000, 'description': 'ข้อมูล OTA'},
+            'factory': {'start': 0x10000, 'end': None, 'description': 'แอปพลิเคชั่นหลัก'}
+        }
+        
+        # หาตำแหน่งของ pattern ที่จะแก้ไข
+        pattern_positions = []
+        start = 0
+        while True:
+            pos = content.find(old_pattern, start)
+            if pos == -1:
+                break
+            pattern_positions.append(pos)
+            start = pos + 1
+            
+        # ตรวจสอบว่า pattern อยู่ในพื้นที่วิกฤตหรือไม่
+        warnings = []
+        risk_level = 'low'
+        
+        for pos in pattern_positions:
+            for zone_name, zone_info in critical_zones.items():
+                zone_start = zone_info['start']
+                zone_end = zone_info.get('end')
+                
+                # ถ้า zone_end เป็น None ให้ใช้ขนาดไฟล์
+                if zone_end is None:
+                    zone_end = len(content)
+                
+                if zone_start <= pos < zone_end:
+                    warning = f"⚠️ พบการแก้ไขในพื้นที่วิกฤต: {zone_info['description']} (ตำแหน่ง: 0x{pos:X})"
+                    warnings.append(warning)
+                    risk_level = 'critical'
+                    
+        return {
+            'risk_level': risk_level,
+            'warnings': warnings,
+            'pattern_count': len(pattern_positions),
+            'positions': pattern_positions
+        }
+    
+    def validate_firmware_before_edit(self, file_path: str) -> Dict[str, Any]:
+        """ตรวจสอบ firmware ก่อนการแก้ไข"""
+        validation_result = {
+            'safe_to_edit': False,
+            'warnings': [],
+            'file_info': {},
+            'recommendations': []
+        }
+        
+        try:
+            # ตรวจสอบไฟล์
+            if not os.path.exists(file_path):
+                validation_result['warnings'].append("ไฟล์ไม่พบ")
+                return validation_result
+                
+            stat = os.stat(file_path)
+            validation_result['file_info'] = {
+                'size': stat.st_size,
+                'modified': stat.st_mtime,
+                'readable': os.access(file_path, os.R_OK),
+                'writable': os.access(file_path, os.W_OK)
+            }
+            
+            # ตรวจสอบสิทธิ์การเขียน
+            if not validation_result['file_info']['writable']:
+                validation_result['warnings'].append("ไม่มีสิทธิ์เขียนไฟล์")
+                return validation_result
+                
+            # ตรวจสอบขนาดไฟล์
+            if stat.st_size == 0:
+                validation_result['warnings'].append("ไฟล์ว่างเปล่า")
+                return validation_result
+                
+            if stat.st_size > 100 * 1024 * 1024:  # > 100MB
+                validation_result['warnings'].append("ไฟล์ใหญ่เกินไป อาจเป็นอันตราย")
+                
+            # ตรวจสอบ integrity
+            integrity_check = self.analyze_firmware_integrity(file_path)
+            if integrity_check.get('error'):
+                validation_result['warnings'].append(f"ตรวจสอบ integrity ไม่ได้: {integrity_check['error']}")
+            elif integrity_check.get('is_firmware'):
+                validation_result['warnings'].append("ตรวจพบว่าเป็นไฟล์ firmware - ระวังการแก้ไข")
+                validation_result['recommendations'].append("สร้างสำรองก่อนแก้ไข")
+            else:
+                validation_result['safe_to_edit'] = True
+                
+            return validation_result
+            
+        except Exception as e:
+            validation_result['warnings'].append(f"เกิดข้อผิดพลาดในการตรวจสอบ: {str(e)}")
+            return validation_result
+    
+    def create_backup_with_metadata(self, file_path: str) -> Tuple[bool, str]:
+        """สร้างไฟล์สำรองพร้อมข้อมูล metadata"""
+        try:
+            timestamp = int(time.time())
+            backup_path = f"{file_path}.backup.{timestamp}"
+            
+            # คัดลอกไฟล์ต้นฉบับ
+            import shutil
+            shutil.copy2(file_path, backup_path)
+            
+            # สร้างไฟล์ metadata
+            metadata = {
+                'original_file': file_path,
+                'backup_time': timestamp,
+                'backup_date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp)),
+                'file_size': os.path.getsize(file_path),
+                'file_hash': self._calculate_file_hash(file_path),
+                'tool_version': '1.0'
+            }
+            
+            metadata_path = f"{backup_path}.meta"
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                import json
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+                
+            return True, f"สร้างสำรองสำเร็จ: {backup_path}"
+            
+        except Exception as e:
+            return False, f"ไม่สามารถสร้างสำรองได้: {str(e)}"
+    
+    def restore_from_backup(self, backup_path: str) -> Tuple[bool, str]:
+        """กู้คืนไฟล์จากสำรอง"""
+        try:
+            if not os.path.exists(backup_path):
+                return False, "ไฟล์สำรองไม่พบ"
+                
+            # อ่าน metadata
+            metadata_path = f"{backup_path}.meta"
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    import json
+                    metadata = json.load(f)
+                    original_file = metadata['original_file']
+            else:
+                # หาไฟล์ต้นฉบับจากชื่อ backup
+                original_file = backup_path.split('.backup.')[0]
+                
+            # กู้คืนไฟล์
+            import shutil
+            shutil.copy2(backup_path, original_file)
+            
+            return True, f"กู้คืนไฟล์สำเร็จ: {original_file}"
+            
+        except Exception as e:
+            return False, f"ไม่สามารถกู้คืนไฟล์ได้: {str(e)}"
+    
+    def _calculate_file_hash(self, file_path: str) -> str:
+        """คำนวณ hash ของไฟล์"""
+        import hashlib
+        hash_sha256 = hashlib.sha256()
+        try:
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
+        except:
+            return "unknown"
 
 class PatternPresets:
     """Firmware-specific pattern presets"""
@@ -536,9 +909,10 @@ class PatternSearchDialog(QDialog):
         self.setMinimumSize(1400, 900)
         self.resize(1600, 1000)
 
-        # ตั้งค่า font ขนาดใหญ่สำหรับ dialog
+        # ตั้งค่า font ขนาดมาตรฐานที่มีสัดส่วนสวยงาม
         font = self.font()
-        font.setPointSize(12)  # เพิ่มขนาดตัวอักษร
+        font.setPointSize(11)  # ปรับขนาดตัวอักษรให้มีสัดส่วนดี
+        font.setWeight(QFont.DemiBold)  # เพิ่มความหนาของตัวอักษร
         self.setFont(font)
 
         self.setup_ui()
@@ -546,24 +920,23 @@ class PatternSearchDialog(QDialog):
     def setup_ui(self):
         layout = QVBoxLayout(self)
         
-        # Header with target path info - ปรับปรุงให้สวยงามขึ้น
+        # Header with target path info - ปรับปรุงให้สวยงามขึ้นและมีสัดส่วนที่ดี
         header = QLabel("🎯 Advanced Pattern Search & Replace System")
         header.setStyleSheet("""
             QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                color: #0d47a1;
+                font-size: 16px;
+                font-weight: 700;
+                color: #1a252f;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #e3f2fd, stop:1 #f3e5f5);
-                border: 2px solid #2196F3;
-                border-radius: 6px;
-                padding: 6px;
-                margin: 3px 0px;
+                    stop:0 #e8f4f8, stop:1 #f0f8ff);
+                border: 2px solid #3498db;
+                border-radius: 8px;
+                padding: 12px;
+                margin: 5px 0px;
             }
         """)
         header.setAlignment(Qt.AlignCenter)
-        # Reduce header height by half
-        header.setMaximumHeight(32)
+        header.setMinimumHeight(50)
         layout.addWidget(header)
 
         # Target path info with browse button - ปรับปรุงให้มีปุ่มเลือกไฟล์
@@ -574,42 +947,42 @@ class PatternSearchDialog(QDialog):
         self.path_info = QLabel(f"📁 Search Location: {self.target_path}")
         self.path_info.setStyleSheet("""
             QLabel {
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 600;
-                color: #2c3e50;
+                color: #1a252f;
                 background-color: #f8f9fa;
                 border: 1px solid #dee2e6;
                 border-radius: 4px;
-                padding: 4px;
+                padding: 8px;
                 margin-bottom: 6px;
             }
         """)
         self.path_info.setWordWrap(True)
-        self.path_info.setMaximumHeight(28)
+        self.path_info.setMinimumHeight(35)
         path_layout.addWidget(self.path_info, 1)
         
         # Browse button
         browse_btn = QPushButton("📂 Browse")
         browse_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2196F3;
+                background-color: #3498db;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 11px;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
                 font-weight: 700;
                 margin-bottom: 6px;
             }
             QPushButton:hover {
-                background-color: #1976D2;
+                background-color: #2980b9;
             }
             QPushButton:pressed {
-                background-color: #1565C0;
+                background-color: #21618c;
             }
         """)
-        browse_btn.setMaximumWidth(70)
-        browse_btn.setMaximumHeight(28)
+        browse_btn.setMinimumWidth(90)
+        browse_btn.setMinimumHeight(35)
         browse_btn.clicked.connect(self.browse_target)
         path_layout.addWidget(browse_btn)
         
@@ -628,12 +1001,13 @@ class PatternSearchDialog(QDialog):
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
                     stop:0 #f8f9fa, stop:1 #e9ecef);
                 border: 1px solid #dee2e6;
-                padding: 6px 15px;
+                padding: 10px 20px;
                 margin-right: 2px;
                 border-radius: 6px 6px 0px 0px;
-                font-size: 11px;
-                font-weight: 600;
-                min-width: 120px;
+                font-size: 12px;
+                font-weight: 700;
+                min-width: 140px;
+                color: #1a252f;
             }
             QTabBar::tab:selected {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
@@ -669,20 +1043,22 @@ class PatternSearchDialog(QDialog):
         # Make the group title more compact and styled
         results_group.setStyleSheet("""
             QGroupBox {
-                font-weight: bold;
-                border: 2px solid #28a745;
+                font-weight: 700;
+                border: 2px solid #27ae60;
                 border-radius: 8px;
                 margin-top: 12px;
-                padding: 8px;
+                padding: 12px;
                 background-color: #f8fff9;
             }
             QGroupBox::title { 
-                font-size: 12px; 
-                color: #28a745;
-                padding: 4px 8px; 
-                margin: 0px 0px 6px 0px;
+                font-size: 13px; 
+                color: #1a252f;
+                font-weight: 700;
+                padding: 6px 12px; 
+                margin: 0px 0px 8px 0px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #27ae60;
             }
         """)
         # Reduce internal margins/spacing so the results area doesn't get pushed down
@@ -718,21 +1094,22 @@ class PatternSearchDialog(QDialog):
             }
         """)
         
-        # ตั้งค่าขนาดตัวอักษรในตาราง
+        # ตั้งค่าขนาดตัวอักษรในตารางให้มีสัดส่วนสวยงาม
         table_font = self.results_table.font()
-        table_font.setPointSize(12)  # เพิ่มขนาดตัวอักษร
-        table_font.setFamily("Consolas, Monaco, 'Courier New', monospace")  # ใช้ monospace font
+        table_font.setPointSize(11)  # ปรับขนาดตัวอักษรให้เหมาะสม
+        table_font.setFamily("Segoe UI, Arial, sans-serif")  # ใช้ฟอนต์ที่อ่านง่าย
+        table_font.setWeight(QFont.DemiBold)  # เพิ่มความชัดเจน
         self.results_table.setFont(table_font)
         
         # กำหนดขนาดแถวให้เหมาะสมกับการแสดงข้อมูล
-        self.results_table.verticalHeader().setDefaultSectionSize(45)
+        self.results_table.verticalHeader().setDefaultSectionSize(50)
         self.results_table.verticalHeader().setVisible(False)  # ซ่อนหมายเลขแถว
         
         # ขนาด header ใหญ่ขึ้นและสวยงาม
         header = self.results_table.horizontalHeader()
         header_font = header.font()
-        header_font.setPointSize(11)  # ลดขนาดหัวตารางให้พอดี
-        header_font.setBold(True)
+        header_font.setPointSize(12)  # เพิ่มขนาดหัวตารางให้ชัดเจน
+        header_font.setWeight(QFont.Bold)
         header.setFont(header_font)
         
         # ปรับการจัดสัดส่วนคอลัมน์ให้เต็มหน้าจอ
@@ -774,11 +1151,11 @@ class PatternSearchDialog(QDialog):
                 font-size: 12px;
             }
             QTableWidget::item {
-                padding: 8px 6px;
+                padding: 12px 8px;
                 border-bottom: 1px solid #e9ecef;
-                min-height: 25px;
-                color: #212529;
-                font-weight: 500;
+                min-height: 30px;
+                color: #1a252f;
+                font-weight: 600;
             }
             QTableWidget::item:selected {
                 background-color: #2196F3;
@@ -790,13 +1167,13 @@ class PatternSearchDialog(QDialog):
                 color: #1976D2;
             }
             QHeaderView::section {
-                background-color: #2196F3;
+                background-color: #34495e;
                 color: white;
-                padding: 10px 8px;
+                padding: 12px 10px;
                 border: none;
-                font-weight: bold;
-                font-size: 11px;
-                min-height: 30px;
+                font-weight: 700;
+                font-size: 12px;
+                min-height: 35px;
                 text-align: center;
             }
             QHeaderView::section:hover {
@@ -839,18 +1216,18 @@ class PatternSearchDialog(QDialog):
         # Export button
         export_btn = QPushButton("� Export Results")
         export_btn.clicked.connect(self.export_results)
-        export_btn.setMinimumHeight(35)
-        export_btn.setMinimumWidth(140)
+        export_btn.setMinimumHeight(40)
+        export_btn.setMinimumWidth(160)
         export_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #17a2b8, stop:1 #20c997);
                 color: white;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 15px;
+                border-radius: 8px;
+                padding: 10px 18px;
                 font-weight: 700;
-                font-size: 12px;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -867,8 +1244,8 @@ class PatternSearchDialog(QDialog):
         # Clear button
         clear_btn = QPushButton("🧹 Clear Results")
         clear_btn.clicked.connect(self.clear_results)
-        clear_btn.setMinimumHeight(35)
-        clear_btn.setMinimumWidth(140)
+        clear_btn.setMinimumHeight(40)
+        clear_btn.setMinimumWidth(160)
         clear_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -934,10 +1311,10 @@ class PatternSearchDialog(QDialog):
         preset_label = QLabel("📋 Quick Presets:")
         preset_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 700;
-                color: #2c3e50;
-                padding: 5px;
+                color: #1a252f;
+                padding: 8px;
             }
         """)
         preset_layout.addWidget(preset_label)
@@ -946,16 +1323,17 @@ class PatternSearchDialog(QDialog):
         for preset_name in PatternPresets.PRESETS.keys():
             self.preset_combo.addItem(preset_name)
         self.preset_combo.currentTextChanged.connect(self.load_preset)
+        self.preset_combo.setMinimumHeight(35)
         self.preset_combo.setStyleSheet("""
             QComboBox {
                 border: 2px solid #6f42c1;
-                border-radius: 4px;
-                padding: 6px 8px;
-                font-size: 11px;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
                 font-weight: 600;
-                color: #2c3e50;
+                color: #1a252f;
                 background-color: white;
-                min-width: 150px;
+                min-width: 180px;
             }
             QComboBox:focus {
                 border-color: #5a32a3;
@@ -963,8 +1341,8 @@ class PatternSearchDialog(QDialog):
             QComboBox::drop-down {
                 border: none;
                 background-color: #6f42c1;
-                width: 20px;
-                border-radius: 0px 4px 4px 0px;
+                width: 25px;
+                border-radius: 0px 6px 6px 0px;
             }
             QComboBox::down-arrow {
                 width: 12px;
@@ -974,10 +1352,11 @@ class PatternSearchDialog(QDialog):
             QComboBox QAbstractItemView {
                 border: 2px solid #6f42c1;
                 background-color: white;
-                color: #2c3e50;
+                color: #1a252f;
                 font-weight: 600;
                 selection-background-color: #6f42c1;
                 selection-color: white;
+                font-size: 11px;
             }
         """)
         preset_layout.addWidget(self.preset_combo)
@@ -988,19 +1367,21 @@ class PatternSearchDialog(QDialog):
         presets_group = QGroupBox("🎨 Smart Pattern Presets Collection")
         presets_group.setStyleSheet("""
             QGroupBox {
-                font-weight: bold;
+                font-weight: 700;
                 border: 2px solid #6f42c1;
                 border-radius: 10px;
-                margin-top: 12px;
-                padding: 12px;
+                margin-top: 15px;
+                padding: 15px;
                 background-color: #faf8ff;
             }
             QGroupBox::title { 
-                color: #6f42c1;
-                font-size: 13px;
-                padding: 4px 8px;
+                color: #1a252f;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #6f42c1;
             }
         """)
         presets_layout = QGridLayout(presets_group)
@@ -1021,15 +1402,15 @@ class PatternSearchDialog(QDialog):
             btn.setToolTip(f"🔍 Pattern: {pattern}")
             btn.clicked.connect(lambda checked, p=pattern: self.set_text_pattern(p))
             
-            # ปรับขนาดปุ่มให้เล็กลงและสวยงาม
-            btn.setMinimumHeight(32)  # ลดความสูง
-            btn.setMinimumWidth(160)  # เพิ่มความกว้างเล็กน้อย
-            btn.setMaximumWidth(200)  # จำกัดความกว้างสูงสุด
+            # ปรับขนาดปุ่มให้มีสัดส่วนสวยงาม
+            btn.setMinimumHeight(38)  # เพิ่มความสูงให้เหมาะสม
+            btn.setMinimumWidth(180)  # เพิ่มความกว้างให้อ่านง่าย
+            btn.setMaximumWidth(220)  # จำกัดความกว้างสูงสุด
             
-            # ตั้งค่า font ของปุ่ม
+            # ตั้งค่า font ของปุ่มให้ชัดเจน
             btn_font = btn.font()
-            btn_font.setPointSize(9)
-            btn_font.setBold(True)
+            btn_font.setPointSize(10)
+            btn_font.setWeight(QFont.Bold)
             btn.setFont(btn_font)
             
             # กำหนดสีที่สวยงามแตกต่างกัน
@@ -1067,37 +1448,39 @@ class PatternSearchDialog(QDialog):
         pattern_group = QGroupBox("✨ Custom Pattern Designer")
         pattern_group.setStyleSheet("""
             QGroupBox {
-                font-weight: bold;
+                font-weight: 700;
                 border: 2px solid #17a2b8;
                 border-radius: 10px;
-                margin-top: 12px;
-                padding: 12px;
+                margin-top: 15px;
+                padding: 18px;
                 background-color: #f0fcff;
             }
             QGroupBox::title { 
-                color: #17a2b8;
-                font-size: 13px;
-                padding: 4px 8px;
+                color: #1a252f;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #17a2b8;
             }
         """)
         pattern_layout = QVBoxLayout(pattern_group)
         pattern_layout.setSpacing(10)
         pattern_layout.setContentsMargins(15, 18, 15, 15)
         
-        # Input field ขนาดเดิม แต่ styling สวยงาม
+        # Input field with proper proportions
         self.text_pattern_input = QLineEdit()
         self.text_pattern_input.setPlaceholderText("🔤 Enter regex pattern (e.g., password[:=]\\s*([^\\s;]+))")
-        self.text_pattern_input.setMinimumHeight(35)  # ความสูงเดิม
+        self.text_pattern_input.setMinimumHeight(42)  # เพิ่มความสูงให้เหมาะสม
         self.text_pattern_input.setStyleSheet("""
             QLineEdit {
                 border: 2px solid #17a2b8;
                 border-radius: 6px;
-                padding: 8px 12px;
+                padding: 10px 15px;
                 font-size: 12px;
                 font-weight: 600;
-                color: #2c3e50;
+                color: #1a252f;
                 background-color: white;
                 selection-background-color: #17a2b8;
                 selection-color: white;
@@ -1109,10 +1492,11 @@ class PatternSearchDialog(QDialog):
             }
         """)
         
-        # Font ของ input field
+        # Font ของ input field ให้ชัดเจน
         input_font = self.text_pattern_input.font()
         input_font.setPointSize(11)
         input_font.setFamily("Consolas, Monaco, 'Courier New', monospace")
+        input_font.setWeight(QFont.DemiBold)
         self.text_pattern_input.setFont(input_font)
         
         pattern_layout.addWidget(self.text_pattern_input)
@@ -1199,13 +1583,13 @@ class PatternSearchDialog(QDialog):
         # Search button - ลดขนาดความสูงลงครึ่งหนึ่ง
         search_btn = QPushButton("� Execute Pattern Search")
         search_btn.clicked.connect(self.search_text_patterns)
-        search_btn.setMinimumHeight(25)  # ลดความสูงลงครึ่งหนึ่ง
-        search_btn.setMinimumWidth(220)  # เพิ่มความกว้างเล็กน้อย
+        search_btn.setMinimumHeight(40)  # เพิ่มความสูงให้เหมาะสม
+        search_btn.setMinimumWidth(250)  # เพิ่มความกว้างให้ดูดี
         
-        # Font ของปุ่ม Search - ปรับตัวอักษรให้พอดี
+        # Font ของปุ่ม Search
         search_font = search_btn.font()
-        search_font.setPointSize(11)  # ลดขนาดตัวอักษร
-        search_font.setBold(True)
+        search_font.setPointSize(12)
+        search_font.setWeight(QFont.Bold)
         search_btn.setFont(search_font)
         
         # สีพื้นหลังสวยๆ พร้อม gradient
@@ -1215,8 +1599,8 @@ class PatternSearchDialog(QDialog):
                     stop:0 #28a745, stop:1 #20c997);
                 color: white;
                 border: none;
-                border-radius: 6px;
-                padding: 6px 12px;
+                border-radius: 8px;
+                padding: 10px 20px;
                 font-weight: 700;
                 font-size: 12px;
             }
@@ -1693,7 +2077,7 @@ class PatternSearchDialog(QDialog):
         self.update_results_table()
     
     def batch_replace(self):
-        """ทำ batch replace"""
+        """ทำ batch replace พร้อมระบบ safety ขั้นสูง"""
         search_pattern = self.config_pattern_input.text().strip()
         replacement = self.replace_input.text()
         
@@ -1702,6 +2086,60 @@ class PatternSearchDialog(QDialog):
             return
         
         preview_only = self.preview_only.isChecked()
+        
+        # 🛡️ ตรวจสอบความปลอดภัยด้วย Advanced Firmware Validator
+        if not preview_only:
+            from advanced_firmware_validator import validate_firmware_safety
+            
+            # ตรวจสอบไฟล์ firmware หลัก
+            firmware_files = []
+            if os.path.isfile(self.target_path):
+                firmware_files = [self.target_path]
+            else:
+                # หาไฟล์ firmware ในโฟล์เดอร์
+                for root, dirs, files in os.walk(self.target_path):
+                    for file in files:
+                        if file.lower().endswith(('.bin', '.img', '.fw', '.rom')):
+                            firmware_files.append(os.path.join(root, file))
+            
+            # ตรวจสอบไฟล์สำคัญ
+            for fw_file in firmware_files[:3]:  # ตรวจสอบ 3 ไฟล์แรก
+                try:
+                    safety_result = validate_firmware_safety(fw_file, search_pattern, replacement)
+                    
+                    if not safety_result['safe_to_proceed']:
+                        # แสดงคำเตือนความปลอดภัย
+                        warning_msg = f"🚨 FIRMWARE SAFETY WARNING\n\n"
+                        warning_msg += f"📁 File: {os.path.basename(fw_file)}\n"
+                        warning_msg += f"⚠️ Risk Level: {safety_result['risk_level'].upper()}\n\n"
+                        
+                        if safety_result['critical_issues']:
+                            warning_msg += "🔥 Critical Issues:\n"
+                            for issue in safety_result['critical_issues'][:3]:
+                                warning_msg += f"• {issue}\n"
+                            warning_msg += "\n"
+                        
+                        if safety_result['recommendations']:
+                            warning_msg += "💡 Recommendations:\n"
+                            for rec in safety_result['recommendations'][:3]:
+                                warning_msg += f"• {rec}\n"
+                        
+                        warning_msg += "\nDo you want to continue?"
+                        
+                        reply = QMessageBox.question(
+                            self, 
+                            "⚠️ Firmware Safety Warning", 
+                            warning_msg,
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No
+                        )
+                        
+                        if reply != QMessageBox.Yes:
+                            return
+                        break
+                        
+                except Exception as e:
+                    print(f"[SAFETY_CHECK] Warning for {fw_file}: {e}")
         
         try:
             results = self.matcher.batch_replace_text(
@@ -1722,6 +2160,9 @@ class PatternSearchDialog(QDialog):
                 
                 for file, count in results.items():
                     msg += f"• {file}: {count} changes\n"
+                
+                if not preview_only:
+                    msg += f"\n🛡️ Advanced Safety Check: ✅ PASSED"
                 
                 QMessageBox.information(self, f"Batch Replace {mode}", msg)
             else:
@@ -1841,11 +2282,17 @@ class PatternSearchDialog(QDialog):
             
         result = self.results[row]
         
-        # Create edit dialog
+        # Create edit dialog with proper proportions
         dialog = QDialog(self)
         dialog.setWindowTitle(f"✏️ Edit Value - {os.path.basename(result.file_path)}")
-        dialog.setMinimumSize(650, 500)
+        dialog.setMinimumSize(700, 600)
         dialog.setModal(True)
+        
+        # Set proper font for the dialog
+        dialog_font = dialog.font()
+        dialog_font.setPointSize(11)
+        dialog_font.setWeight(QFont.DemiBold)
+        dialog.setFont(dialog_font)
         
         # เพิ่ม styling สำหรับ dialog
         dialog.setStyleSheet("""
@@ -1857,43 +2304,47 @@ class PatternSearchDialog(QDialog):
         """)
         
         layout = QVBoxLayout(dialog)
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+        layout.setContentsMargins(25, 25, 25, 25)
         
-        # File info
+        # File info with proper proportions
         info_group = QGroupBox("📄 File Information")
         info_group.setStyleSheet("""
             QGroupBox {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 700;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #3498db;
                 border-radius: 8px;
-                margin-top: 12px;
-                padding: 15px;
+                margin-top: 15px;
+                padding: 20px;
                 background-color: #f8f9fa;
             }
             QGroupBox::title {
-                color: #2c3e50;
+                color: #1a252f;
                 font-weight: 700;
-                padding: 4px 8px;
+                font-size: 13px;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #3498db;
             }
         """)
         info_layout = QFormLayout()
+        info_layout.setSpacing(12)
         
-        # สร้าง labels ที่มีสีเข้ม
+        # สร้าง labels ที่มีสีเข้มและขนาดที่เหมาะสม
         file_label = QLabel("📁 File:")
-        file_label.setStyleSheet("font-weight: 700; color: #2c3e50; font-size: 12px;")
+        file_label.setStyleSheet("font-weight: 700; color: #1a252f; font-size: 13px;")
         file_value = QLabel(result.file_path)
-        file_value.setStyleSheet("font-weight: 600; color: #34495e; font-size: 11px;")
+        file_value.setStyleSheet("font-weight: 600; color: #2c3e50; font-size: 12px;")
+        file_value.setWordWrap(True)
         info_layout.addRow(file_label, file_value)
         
         offset_label = QLabel("📍 Offset:")
-        offset_label.setStyleSheet("font-weight: 700; color: #2c3e50; font-size: 12px;")
+        offset_label.setStyleSheet("font-weight: 700; color: #1a252f; font-size: 13px;")
         offset_value = QLabel(f"0x{result.offset:X} ({result.offset})")
-        offset_value.setStyleSheet("font-weight: 600; color: #e67e22; font-size: 11px;")
+        offset_value.setStyleSheet("font-weight: 600; color: #e67e22; font-size: 12px;")
         info_layout.addRow(offset_label, offset_value)
         
         info_group.setLayout(info_layout)
@@ -1903,48 +2354,52 @@ class PatternSearchDialog(QDialog):
         current_group = QGroupBox("🎯 Current Value")
         current_group.setStyleSheet("""
             QGroupBox {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 700;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #27ae60;
                 border-radius: 8px;
-                margin-top: 12px;
-                padding: 15px;
-                background-color: #f8f9fa;
+                margin-top: 15px;
+                padding: 20px;
+                background-color: #f8fff9;
             }
             QGroupBox::title {
-                color: #2c3e50;
+                color: #1a252f;
                 font-weight: 700;
-                padding: 4px 8px;
+                font-size: 13px;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #27ae60;
             }
         """)
         current_layout = QVBoxLayout()
+        current_layout.setSpacing(10)
         
         current_label = QLabel("Current value:")
         current_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 700;
-                color: #2c3e50;
-                padding: 5px 0px;
+                color: #1a252f;
+                padding: 8px 0px;
             }
         """)
         current_layout.addWidget(current_label)
         
         current_text = QLineEdit(result.match)
         current_text.setReadOnly(True)
+        current_text.setMinimumHeight(40)
         current_text.setStyleSheet("""
             QLineEdit {
                 background-color: #f8f9fa; 
-                font-family: monospace; 
+                font-family: 'Consolas', 'Monaco', monospace; 
                 font-size: 12px;
                 font-weight: 600;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #dee2e6;
-                border-radius: 4px;
-                padding: 6px;
+                border-radius: 6px;
+                padding: 10px;
             }
         """)
         current_layout.addWidget(current_text)
@@ -1956,51 +2411,56 @@ class PatternSearchDialog(QDialog):
         new_group = QGroupBox("✏️ New Value")
         new_group.setStyleSheet("""
             QGroupBox {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 700;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #f39c12;
                 border-radius: 8px;
-                margin-top: 12px;
-                padding: 15px;
-                background-color: #f8f9fa;
+                margin-top: 15px;
+                padding: 20px;
+                background-color: #fffbf0;
             }
             QGroupBox::title {
-                color: #2c3e50;
+                color: #1a252f;
                 font-weight: 700;
-                padding: 4px 8px;
+                font-size: 13px;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #f39c12;
             }
         """)
         new_layout = QVBoxLayout()
+        new_layout.setSpacing(10)
         
         new_label = QLabel("Enter new value:")
         new_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 700;
-                color: #2c3e50;
-                padding: 5px 0px;
+                color: #1a252f;
+                padding: 8px 0px;
             }
         """)
         new_layout.addWidget(new_label)
         
         new_text = QLineEdit(result.match)
+        new_text.setMinimumHeight(40)
         new_text.setStyleSheet("""
             QLineEdit {
                 background-color: #fff3cd;
                 border: 2px solid #ffc107;
-                border-radius: 4px;
-                padding: 8px;
-                font-family: monospace;
+                border-radius: 6px;
+                padding: 10px;
+                font-family: 'Consolas', 'Monaco', monospace;
                 font-size: 12px;
-                font-weight: bold;
-                color: #1a1a1a;
+                font-weight: 700;
+                color: #1a252f;
             }
             QLineEdit:focus {
                 border-color: #e0a800;
-                color: #000000;
+                background-color: #ffeb99;
+                color: #1a252f;
             }
         """)
         new_text.selectAll()  # Select all text for easy editing
@@ -2013,39 +2473,42 @@ class PatternSearchDialog(QDialog):
         context_group = QGroupBox("📝 Context Preview")
         context_group.setStyleSheet("""
             QGroupBox {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 700;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #9b59b6;
                 border-radius: 8px;
-                margin-top: 12px;
-                padding: 15px;
-                background-color: #f8f9fa;
+                margin-top: 15px;
+                padding: 20px;
+                background-color: #faf8ff;
             }
             QGroupBox::title {
-                color: #2c3e50;
+                color: #1a252f;
                 font-weight: 700;
-                padding: 4px 8px;
+                font-size: 13px;
+                padding: 8px 12px;
                 background-color: white;
                 border-radius: 4px;
+                border: 1px solid #9b59b6;
             }
         """)
         context_layout = QVBoxLayout()
+        context_layout.setSpacing(10)
         
         context_text = QTextEdit()
         context_text.setPlainText(result.context)
         context_text.setReadOnly(True)
-        context_text.setMaximumHeight(100)
+        context_text.setMaximumHeight(120)
         context_text.setStyleSheet("""
             QTextEdit {
                 background-color: #f8f9fa; 
-                font-family: monospace; 
+                font-family: 'Consolas', 'Monaco', monospace; 
                 font-size: 11px;
                 font-weight: 600;
-                color: #2c3e50;
+                color: #1a252f;
                 border: 2px solid #dee2e6;
-                border-radius: 4px;
-                padding: 6px;
+                border-radius: 6px;
+                padding: 10px;
             }
         """)
         context_layout.addWidget(context_text)
@@ -2053,41 +2516,58 @@ class PatternSearchDialog(QDialog):
         context_group.setLayout(context_layout)
         layout.addWidget(context_group)
         
-        # Buttons
+        # Buttons with proper proportions
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(15)
+        button_layout.setContentsMargins(0, 20, 0, 0)
 
         save_btn = QPushButton("💾 Save Changes")
+        save_btn.setMinimumHeight(45)
+        save_btn.setMinimumWidth(150)
         save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #28a745;
+                background-color: #27ae60;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
+                border-radius: 6px;
+                padding: 12px 24px;
                 font-weight: 700;
-                font-size: 12px;
+                font-size: 13px;
             }
             QPushButton:hover { 
-                background-color: #218838; 
+                background-color: #229954;
+                transform: translateY(-1px);
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+                transform: translateY(0px);
             }
         """)
 
         cancel_btn = QPushButton("❌ Cancel")
+        cancel_btn.setMinimumHeight(45)
+        cancel_btn.setMinimumWidth(120)
         cancel_btn.setStyleSheet("""
             QPushButton {
                 background-color: #6c757d;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
+                border-radius: 6px;
+                padding: 12px 24px;
                 font-weight: 700;
-                font-size: 12px;
+                font-size: 13px;
             }
             QPushButton:hover { 
-                background-color: #5a6268; 
+                background-color: #5a6268;
+                transform: translateY(-1px);
+            }
+            QPushButton:pressed {
+                background-color: #495057;
+                transform: translateY(0px);
             }
         """)
 
+        button_layout.addStretch()
         button_layout.addWidget(save_btn)
         button_layout.addWidget(cancel_btn)
         # addLayout because button_layout is a QLayout, not a QWidget
@@ -2121,21 +2601,41 @@ class PatternSearchDialog(QDialog):
             print(f"[PATTERN] Old value: '{old_value}'")
             print(f"[PATTERN] New value: '{new_value}'")
             
-            # Additional safety check for firmware files
-            file_extension = os.path.splitext(file_path)[1].lower()
-            firmware_extensions = ['.bin', '.img', '.rom', '.fw', '.uimage', '.squashfs']
-            
-            if file_extension in firmware_extensions or 'firmware' in file_path.lower():
-                # Extra confirmation for firmware files
-                reply = QMessageBox.question(self, "⚠️ Firmware Edit Warning", 
-                    f"You are about to edit a firmware file:\n{os.path.basename(file_path)}\n\n"
-                    f"Old value: '{old_value}'\n"
-                    f"New value: '{new_value}'\n\n"
-                    f"⚠️ WARNING: Editing firmware files can make devices unbootable!\n"
-                    f"✅ A backup will be created automatically.\n\n"
-                    f"Are you sure you want to continue?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No)
+            # ตรวจสอบความปลอดภัยสำหรับไฟล์ firmware
+            if self.matcher._is_firmware_file(file_path):
+                # อ่านไฟล์เพื่อตรวจสอบพื้นที่เสี่ยง
+                try:
+                    with open(file_path, 'rb') as f:
+                        data = f.read()
+                    is_critical = self.matcher._is_critical_firmware_area(data, old_value)
+                except:
+                    is_critical = False
+                
+                # สร้างข้อความเตือนตามระดับความเสี่ยง
+                if is_critical:
+                    warning_msg = f"🚨 อันตราย! คุณกำลังแก้ไขในพื้นที่สำคัญของ firmware!\n\n"
+                    warning_msg += f"ไฟล์: {os.path.basename(file_path)}\n"
+                    warning_msg += f"ค่าเดิม: '{old_value}'\n"
+                    warning_msg += f"ค่าใหม่: '{new_value}'\n\n"
+                    warning_msg += f"⚠️ เตือน: การแก้ไขนี้อาจทำให้อุปกรณ์บูตไม่ขึ้น!\n"
+                    warning_msg += f"📍 ตำแหน่งที่แก้ไขใกล้ส่วน bootloader หรือ partition table\n\n"
+                    warning_msg += f"🔐 ควรมีวิธีกู้คืน (JTAG/Recovery mode) ก่อนดำเนินการ\n\n"
+                    warning_msg += f"คุณแน่ใจหรือว่าต้องการดำเนินการต่อ?"
+                    
+                    reply = QMessageBox.critical(self, "🚨 เตือนอันตรายสูง - Firmware Critical Area", 
+                        warning_msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                else:
+                    warning_msg = f"⚠️ คุณกำลังแก้ไขไฟล์ firmware:\n\n"
+                    warning_msg += f"ไฟล์: {os.path.basename(file_path)}\n"
+                    warning_msg += f"ค่าเดิม: '{old_value}'\n"
+                    warning_msg += f"ค่าใหม่: '{new_value}'\n\n"
+                    warning_msg += f"⚠️ เตือน: การแก้ไข firmware อาจทำให้อุปกรณ์บูตไม่ขึ้น!\n"
+                    warning_msg += f"✅ ระบบจะสร้างไฟล์สำรองให้อัตโนมัติ\n"
+                    warning_msg += f"🔧 ตรวจสอบให้แน่ใจว่าค่าใหม่ถูกต้อง\n\n"
+                    warning_msg += f"คุณต้องการดำเนินการต่อหรือไม่?"
+                    
+                    reply = QMessageBox.question(self, "⚠️ เตือนการแก้ไข Firmware", 
+                        warning_msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                 
                 if reply == QMessageBox.No:
                     return
@@ -2169,17 +2669,33 @@ class PatternSearchDialog(QDialog):
 
             dialog.accept()
 
-            QMessageBox.information(self, "✅ Success", 
-                                  f"Changes saved successfully!\n\n"
-                                  f"File: {os.path.basename(file_path)}\n"
-                                  f"Old: '{old_value}'\n"
-                                  f"New: '{new_value}'\n\n"
-                                  f"Backup created: {os.path.basename(backup_path) if backup_path else 'N/A'}")
+            # วิเคราะห์ firmware หลังแก้ไข (ถ้าเป็นไฟล์ firmware)
+            integrity_msg = ""
+            if self.matcher._is_firmware_file(file_path):
+                analysis = self.matcher.analyze_firmware_integrity(file_path)
+                if 'error' not in analysis:
+                    integrity_msg = f"\n🔍 การวิเคราะห์ firmware:\n"
+                    integrity_msg += f"• ขนาดไฟล์: {analysis['file_size']:,} bytes\n"
+                    integrity_msg += f"• MD5: {analysis['md5'][:16]}...\n"
+                    if analysis['magic_signatures']:
+                        integrity_msg += f"• พบ signatures: {len(analysis['magic_signatures'])} รายการ\n"
+                    
+                    # เตือนถ้าพบพื้นที่น่าสงสัย
+                    if analysis['suspicious_areas']:
+                        integrity_msg += f"⚠️ พบพื้นที่น่าสงสัย: {len(analysis['suspicious_areas'])} จุด\n"
+            
+            QMessageBox.information(self, "✅ บันทึกสำเร็จ", 
+                              f"บันทึกการเปลี่ยนแปลงเรียบร้อยแล้ว!\n\n"
+                              f"ไฟล์: {os.path.basename(file_path)}\n"
+                              f"ค่าเดิม: '{old_value}'\n"
+                              f"ค่าใหม่: '{new_value}'\n\n"
+                              f"ไฟล์สำรอง: {os.path.basename(backup_path) if backup_path else 'ไม่มี'}"
+                              f"{integrity_msg}")
             
         except Exception as e:
-            QMessageBox.critical(self, "❌ Error", 
-                               f"Failed to save changes:\n{str(e)}\n\n"
-                               f"Please check file permissions and try again.")
+            QMessageBox.critical(self, "❌ ข้อผิดพลาด", 
+                               f"ไม่สามารถบันทึกการเปลี่ยนแปลงได้:\n{str(e)}\n\n"
+                               f"กรุณาตรวจสอบสิทธิ์การเข้าถึงไฟล์แล้วลองอีกครั้ง")
             print(f"[PATTERN] Save error: {e}")
 
 
