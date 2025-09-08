@@ -550,9 +550,9 @@ class PatternSearchDialog(QDialog):
         header = QLabel("🎯 Advanced Pattern Search & Replace System")
         header.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 14px;
                 font-weight: bold;
-                color: #1976D2;
+                color: #0d47a1;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #e3f2fd, stop:1 #f3e5f5);
                 border: 2px solid #2196F3;
@@ -566,13 +566,17 @@ class PatternSearchDialog(QDialog):
         header.setMaximumHeight(32)
         layout.addWidget(header)
 
-        # Target path info - ปรับปรุงให้อ่านง่ายขึ้น
-        path_info = QLabel(f"📁 Search Location: {self.target_path}")
-        path_info.setStyleSheet("""
+        # Target path info with browse button - ปรับปรุงให้มีปุ่มเลือกไฟล์
+        path_frame = QFrame()
+        path_layout = QHBoxLayout(path_frame)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.path_info = QLabel(f"📁 Search Location: {self.target_path}")
+        self.path_info.setStyleSheet("""
             QLabel {
-                font-size: 10px;
-                font-weight: 500;
-                color: #424242;
+                font-size: 11px;
+                font-weight: 600;
+                color: #2c3e50;
                 background-color: #f8f9fa;
                 border: 1px solid #dee2e6;
                 border-radius: 4px;
@@ -580,10 +584,36 @@ class PatternSearchDialog(QDialog):
                 margin-bottom: 6px;
             }
         """)
-        path_info.setWordWrap(True)
-        # Reduce path info height
-        path_info.setMaximumHeight(28)
-        layout.addWidget(path_info)
+        self.path_info.setWordWrap(True)
+        self.path_info.setMaximumHeight(28)
+        path_layout.addWidget(self.path_info, 1)
+        
+        # Browse button
+        browse_btn = QPushButton("📂 Browse")
+        browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 700;
+                margin-bottom: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #1565C0;
+            }
+        """)
+        browse_btn.setMaximumWidth(70)
+        browse_btn.setMaximumHeight(28)
+        browse_btn.clicked.connect(self.browse_target)
+        path_layout.addWidget(browse_btn)
+        
+        layout.addWidget(path_frame)
         
         # Tabs for different search types - ปรับปรุง styling
         tabs = QTabWidget()
@@ -663,12 +693,30 @@ class PatternSearchDialog(QDialog):
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(5)  # เพิ่มคอลัมน์ "Edit"
         self.results_table.setHorizontalHeaderLabels([
-            "📁 File Name", 
-            "📍 Offset Position", 
-            "🎯 Found Value", 
-            "📝 Context Preview", 
-            "✏️ Edit Action"
+            "File", 
+            "Position", 
+            "Found Value", 
+            "Context", 
+            "Edit"
         ])
+        
+        # ปรับแต่ง table headers ให้สวยงาม
+        header = self.results_table.horizontalHeader()
+        header.setVisible(True)
+        header.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #34495e;
+                color: white;
+                padding: 8px;
+                border: 1px solid #2c3e50;
+                font-size: 12px;
+                font-weight: 700;
+                text-align: center;
+            }
+            QHeaderView::section:hover {
+                background-color: #2c3e50;
+            }
+        """)
         
         # ตั้งค่าขนาดตัวอักษรในตาราง
         table_font = self.results_table.font()
@@ -676,33 +724,35 @@ class PatternSearchDialog(QDialog):
         table_font.setFamily("Consolas, Monaco, 'Courier New', monospace")  # ใช้ monospace font
         self.results_table.setFont(table_font)
         
-        # ลดขนาดแถวลง 30% เพื่อให้แสดงผลได้มากขึ้น
-        self.results_table.verticalHeader().setDefaultSectionSize(35)
+        # กำหนดขนาดแถวให้เหมาะสมกับการแสดงข้อมูล
+        self.results_table.verticalHeader().setDefaultSectionSize(45)
+        self.results_table.verticalHeader().setVisible(False)  # ซ่อนหมายเลขแถว
         
         # ขนาด header ใหญ่ขึ้นและสวยงาม
         header = self.results_table.horizontalHeader()
         header_font = header.font()
-        header_font.setPointSize(13)  # เพิ่มขนาดหัวตาราง
+        header_font.setPointSize(11)  # ลดขนาดหัวตารางให้พอดี
         header_font.setBold(True)
         header.setFont(header_font)
         
-        # กำหนดขนาดคอลัมน์ให้เต็มหน้าจอแนวนอน
-        self.results_table.setColumnWidth(0, 280)  # File Name (เพิ่มขึ้น)
-        self.results_table.setColumnWidth(1, 120)  # Offset 
-        self.results_table.setColumnWidth(2, 350)  # Found Value (เพิ่มขึ้น)
-        self.results_table.setColumnWidth(3, 500)  # Context (เพิ่มขึ้น)
-        self.results_table.setColumnWidth(4, 140)  # Edit Action (เพิ่มขึ้น)
-
-        # Ensure headers and resize behavior allow the Edit column to remain visible
-        hheader = self.results_table.horizontalHeader()
-        hheader.setSectionResizeMode(QHeaderView.Interactive)
-        # Make sure the edit column resizes to contents so button is visible
-        try:
-            hheader.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        except Exception:
-            # fallback for PySide6 versions that require different handling
-            pass
-        hheader.setStretchLastSection(False)
+        # ปรับการจัดสัดส่วนคอลัมน์ให้เต็มหน้าจอ
+        header = self.results_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)  # ทำให้คอลัมน์ยืดเต็มหน้าจอ
+        
+        # กำหนดสัดส่วนคอลัมน์ให้สวยงาม
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # File - ปรับตามเนื้อหา
+        header.setSectionResizeMode(1, QHeaderView.Fixed)              # Position - ขนาดคงที่
+        header.setSectionResizeMode(2, QHeaderView.Stretch)            # Found Value - ยืดหยุ่น
+        header.setSectionResizeMode(3, QHeaderView.Stretch)            # Context - ยืดหยุ่น
+        header.setSectionResizeMode(4, QHeaderView.Fixed)              # Edit - ขนาดคงที่
+        
+        # กำหนดขนาดคงที่สำหรับคอลัมน์ที่ต้องการ
+        self.results_table.setColumnWidth(1, 120)  # Position column
+        self.results_table.setColumnWidth(4, 100)  # Edit column
+        
+        # ตั้งค่าเพิ่มเติมสำหรับ header
+        header.setStretchLastSection(False)
+        header.setHighlightSections(True)
 
         # Allow scrollbars and adjust policy so content isn't clipped
         self.results_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -711,12 +761,14 @@ class PatternSearchDialog(QDialog):
         
         # สีพื้นหลังสลับแถวและ styling ที่สวยงาม
         self.results_table.setAlternatingRowColors(True)
+        self.results_table.setShowGrid(True)
         self.results_table.setStyleSheet("""
             QTableWidget {
                 alternate-background-color: #f8f9fa;
                 background-color: white;
-                gridline-color: #dee2e6;
-                selection-background-color: #e3f2fd;
+                gridline-color: #bdc3c7;
+                selection-background-color: #3498db;
+                selection-color: white;
                 border: 2px solid #2196F3;
                 border-radius: 8px;
                 font-size: 12px;
@@ -725,6 +777,8 @@ class PatternSearchDialog(QDialog):
                 padding: 8px 6px;
                 border-bottom: 1px solid #e9ecef;
                 min-height: 25px;
+                color: #212529;
+                font-weight: 500;
             }
             QTableWidget::item:selected {
                 background-color: #2196F3;
@@ -732,16 +786,18 @@ class PatternSearchDialog(QDialog):
                 font-weight: bold;
             }
             QTableWidget::item:hover {
-                background-color: #f0f8ff;
+                background-color: #e3f2fd;
+                color: #1976D2;
             }
             QHeaderView::section {
                 background-color: #2196F3;
                 color: white;
-                padding: 8px 6px;
+                padding: 10px 8px;
                 border: none;
                 font-weight: bold;
-                font-size: 12px;
-                min-height: 28px;
+                font-size: 11px;
+                min-height: 30px;
+                text-align: center;
             }
             QHeaderView::section:hover {
                 background-color: #1976D2;
@@ -793,8 +849,8 @@ class PatternSearchDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 8px 15px;
-                font-weight: bold;
-                font-size: 11px;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -821,8 +877,8 @@ class PatternSearchDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 8px 15px;
-                font-weight: bold;
-                font-size: 11px;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -851,8 +907,8 @@ class PatternSearchDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 8px 15px;
-                font-weight: bold;
-                font-size: 11px;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -875,12 +931,55 @@ class PatternSearchDialog(QDialog):
         
         # Preset combo box
         preset_layout = QHBoxLayout()
-        preset_layout.addWidget(QLabel("📋 Quick Presets:"))
+        preset_label = QLabel("📋 Quick Presets:")
+        preset_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
+                padding: 5px;
+            }
+        """)
+        preset_layout.addWidget(preset_label)
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("-- Select Preset --")
         for preset_name in PatternPresets.PRESETS.keys():
             self.preset_combo.addItem(preset_name)
         self.preset_combo.currentTextChanged.connect(self.load_preset)
+        self.preset_combo.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #6f42c1;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 11px;
+                font-weight: 600;
+                color: #2c3e50;
+                background-color: white;
+                min-width: 150px;
+            }
+            QComboBox:focus {
+                border-color: #5a32a3;
+            }
+            QComboBox::drop-down {
+                border: none;
+                background-color: #6f42c1;
+                width: 20px;
+                border-radius: 0px 4px 4px 0px;
+            }
+            QComboBox::down-arrow {
+                width: 12px;
+                height: 12px;
+                background-color: white;
+            }
+            QComboBox QAbstractItemView {
+                border: 2px solid #6f42c1;
+                background-color: white;
+                color: #2c3e50;
+                font-weight: 600;
+                selection-background-color: #6f42c1;
+                selection-color: white;
+            }
+        """)
         preset_layout.addWidget(self.preset_combo)
         preset_layout.addStretch()
         layout.addLayout(preset_layout)
@@ -996,7 +1095,9 @@ class PatternSearchDialog(QDialog):
                 border: 2px solid #17a2b8;
                 border-radius: 6px;
                 padding: 8px 12px;
-                font-size: 11px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #2c3e50;
                 background-color: white;
                 selection-background-color: #17a2b8;
                 selection-color: white;
@@ -1004,6 +1105,7 @@ class PatternSearchDialog(QDialog):
             QLineEdit:focus {
                 border-color: #138496;
                 box-shadow: 0 0 5px rgba(23, 162, 184, 0.3);
+                color: #1a252f;
             }
         """)
         
@@ -1023,9 +1125,9 @@ class PatternSearchDialog(QDialog):
         # Checkbox styling
         checkbox_style = """
             QCheckBox {
-                font-size: 11px;
-                font-weight: 500;
-                color: #495057;
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
                 spacing: 8px;
             }
             QCheckBox::indicator {
@@ -1060,9 +1162,9 @@ class PatternSearchDialog(QDialog):
         ext_label = QLabel("📂 File Extensions:")
         ext_label.setStyleSheet("""
             QLabel {
-                font-size: 11px;
-                font-weight: 600;
-                color: #495057;
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
                 padding: 5px;
             }
         """)
@@ -1077,7 +1179,9 @@ class PatternSearchDialog(QDialog):
                 border: 2px solid #ced4da;
                 border-radius: 4px;
                 padding: 4px 8px;
-                font-size: 10px;
+                font-size: 11px;
+                font-weight: 600;
+                color: #2c3e50;
                 background-color: white;
                 selection-background-color: #007bff;
                 selection-color: white;
@@ -1085,6 +1189,7 @@ class PatternSearchDialog(QDialog):
             QLineEdit:focus {
                 border-color: #007bff;
                 box-shadow: 0 0 3px rgba(0, 123, 255, 0.25);
+                color: #1a252f;
             }
         """)
         options_layout.addWidget(self.file_extensions)
@@ -1112,7 +1217,8 @@ class PatternSearchDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 6px 12px;
-                font-weight: bold;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -1246,6 +1352,8 @@ class PatternSearchDialog(QDialog):
                 border-radius: 6px;
                 padding: 8px 12px;
                 font-size: 11px;
+                font-weight: 600;
+                color: #2c3e50;
                 background-color: white;
                 selection-background-color: #6f42c1;
                 selection-color: white;
@@ -1253,6 +1361,7 @@ class PatternSearchDialog(QDialog):
             QLineEdit:focus {
                 border-color: #5a32a3;
                 box-shadow: 0 0 5px rgba(111, 66, 193, 0.3);
+                color: #1a252f;
             }
         """)
         pattern_layout.addWidget(self.binary_pattern_input)
@@ -1269,7 +1378,8 @@ class PatternSearchDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 6px 12px;
-                font-weight: bold;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover { 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
@@ -1378,22 +1488,70 @@ class PatternSearchDialog(QDialog):
         
         search_label = QLabel("🔍 Search Pattern:")
         search_label.setFont(label_font)
+        search_label.setStyleSheet("""
+            QLabel {
+                font-weight: 700;
+                color: #2c3e50;
+                padding: 5px 0px;
+            }
+        """)
         replace_layout.addWidget(search_label)
         
         self.config_pattern_input = QLineEdit()
         self.config_pattern_input.setPlaceholderText("Search pattern (regex)")
         self.config_pattern_input.setFont(input_font)
         self.config_pattern_input.setMinimumHeight(35)
+        self.config_pattern_input.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #17a2b8;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-weight: 600;
+                color: #2c3e50;
+                background-color: white;
+                selection-background-color: #17a2b8;
+                selection-color: white;
+            }
+            QLineEdit:focus {
+                border-color: #138496;
+                box-shadow: 0 0 5px rgba(23, 162, 184, 0.3);
+                color: #1a252f;
+            }
+        """)
         replace_layout.addWidget(self.config_pattern_input)
         
         replace_label = QLabel("� Replace With:")
         replace_label.setFont(label_font)
+        replace_label.setStyleSheet("""
+            QLabel {
+                font-weight: 700;
+                color: #2c3e50;
+                padding: 5px 0px;
+            }
+        """)
         replace_layout.addWidget(replace_label)
         
         self.replace_input = QLineEdit()
         self.replace_input.setPlaceholderText("Replacement text")
         self.replace_input.setFont(input_font)
         self.replace_input.setMinimumHeight(35)
+        self.replace_input.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #28a745;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-weight: 600;
+                color: #2c3e50;
+                background-color: white;
+                selection-background-color: #28a745;
+                selection-color: white;
+            }
+            QLineEdit:focus {
+                border-color: #1e7e34;
+                box-shadow: 0 0 5px rgba(40, 167, 69, 0.3);
+                color: #1a252f;
+            }
+        """)
         replace_layout.addWidget(self.replace_input)
         
         # Replace options - ขนาดใหญ่ขึ้น
@@ -1402,11 +1560,55 @@ class PatternSearchDialog(QDialog):
         self.preview_only = QCheckBox("Preview Only")
         self.preview_only.setChecked(True)
         self.preview_only.setFont(input_font)
+        self.preview_only.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 3px;
+                border: 2px solid #6c757d;
+                background-color: white;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #28a745;
+                border-color: #28a745;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #28a745;
+            }
+        """)
         replace_options.addWidget(self.preview_only)
         
         self.backup_files = QCheckBox("Create Backups")
         self.backup_files.setChecked(True)
         self.backup_files.setFont(input_font)
+        self.backup_files.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 3px;
+                border: 2px solid #6c757d;
+                background-color: white;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #28a745;
+                border-color: #28a745;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #28a745;
+            }
+        """)
         replace_options.addWidget(self.backup_files)
         
         replace_layout.addLayout(replace_options)
@@ -1421,7 +1623,8 @@ class PatternSearchDialog(QDialog):
                 background-color: #ff6b35; 
                 color: white; 
                 border-radius: 5px;
-                font-weight: bold;
+                font-weight: 700;
+                font-size: 12px;
             }
             QPushButton:hover { 
                 background-color: #e55a2e; 
@@ -1531,26 +1734,52 @@ class PatternSearchDialog(QDialog):
         """อัปเดตตาราง results พร้อมปุ่มแก้ไข"""
         self.results_table.setRowCount(len(self.results))
         
+        # ตั้งค่าฟอนต์สำหรับข้อมูลในตาราง
+        item_font = QFont()
+        item_font.setPointSize(11)
+        item_font.setWeight(QFont.Bold)  # ทำให้ตัวอักษรเข้มขึ้น
+        
         for row, result in enumerate(self.results):
-            # File name
-            file_item = QTableWidgetItem(result.file_path)
-            file_item.setToolTip(f"Full path: {result.file_path}")  # แสดง path เต็มใน tooltip
+            # File name - แสดงเฉพาะชื่อไฟล์ ไม่ใช่ path เต็ม
+            import os
+            file_name = os.path.basename(result.file_path)
+            file_item = QTableWidgetItem(file_name)
+            file_item.setFont(item_font)
+            file_item.setToolTip(f"Full path: {result.file_path}")
+            file_item.setForeground(QColor("#1a252f"))  # สีเข้มมาก
+            file_item.setBackground(QColor("#f8f9fa"))  # พื้นหลังอ่อน
             self.results_table.setItem(row, 0, file_item)
             
-            # Offset
-            offset_item = QTableWidgetItem(f"0x{result.offset:X}")
-            offset_item.setToolTip(f"Decimal: {result.offset}")
+            # Position - แสดงทั้ง hex และ decimal
+            position_text = f"0x{result.offset:X} ({result.offset})"
+            offset_item = QTableWidgetItem(position_text)
+            offset_item.setFont(item_font)
+            offset_item.setToolTip(f"Hex: 0x{result.offset:X}, Decimal: {result.offset}")
+            offset_item.setForeground(QColor("#d35400"))  # สีส้มเข้ม
+            offset_item.setBackground(QColor("#fef9e7"))  # พื้นหลังเหลืองอ่อน
             self.results_table.setItem(row, 1, offset_item)
             
-            # Found value - สามารถแก้ไขได้
-            match_item = QTableWidgetItem(result.match)
-            match_item.setToolTip("Double-click to edit this value")
-            match_item.setFlags(match_item.flags() | Qt.ItemIsEditable)  # ให้แก้ไขได้
+            # Found value - แสดงค่าที่เจอพร้อมความยาว
+            found_text = result.match
+            if len(found_text) > 50:
+                found_text = found_text[:47] + "..."
+            match_item = QTableWidgetItem(found_text)
+            match_item.setFont(item_font)
+            match_item.setToolTip(f"Full value: {result.match}\nLength: {len(result.match)} characters\nDouble-click to edit")
+            match_item.setFlags(match_item.flags() | Qt.ItemIsEditable)
+            match_item.setForeground(QColor("#1e8449"))  # สีเขียวเข้ม
+            match_item.setBackground(QColor("#e8f5e8"))  # พื้นหลังเขียวอ่อน
             self.results_table.setItem(row, 2, match_item)
             
-            # Context
-            context_item = QTableWidgetItem(result.context)
-            context_item.setToolTip("Context around the found value")
+            # Context - แสดง context ย่อ
+            context_text = result.context.replace('\n', '\\n').replace('\t', '\\t')
+            if len(context_text) > 60:
+                context_text = context_text[:57] + "..."
+            context_item = QTableWidgetItem(context_text)
+            context_item.setFont(item_font)
+            context_item.setToolTip(f"Full context: {result.context}")
+            context_item.setForeground(QColor("#2c3e50"))  # สีเทาเข้ม
+            context_item.setBackground(QColor("#ecf0f1"))  # พื้นหลังเทาอ่อน
             self.results_table.setItem(row, 3, context_item)
             
             # Edit button
@@ -1614,30 +1843,110 @@ class PatternSearchDialog(QDialog):
         
         # Create edit dialog
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"✏️ Edit Value - {result.file_path}")
-        dialog.setMinimumSize(600, 400)
+        dialog.setWindowTitle(f"✏️ Edit Value - {os.path.basename(result.file_path)}")
+        dialog.setMinimumSize(650, 500)
         dialog.setModal(True)
         
+        # เพิ่ม styling สำหรับ dialog
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #ffffff;
+                border: 2px solid #3498db;
+                border-radius: 10px;
+            }
+        """)
+        
         layout = QVBoxLayout(dialog)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # File info
         info_group = QGroupBox("📄 File Information")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: 700;
+                color: #2c3e50;
+                border: 2px solid #3498db;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 15px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+                font-weight: 700;
+                padding: 4px 8px;
+                background-color: white;
+                border-radius: 4px;
+            }
+        """)
         info_layout = QFormLayout()
-        info_layout.addRow("📁 File:", QLabel(result.file_path))
-        info_layout.addRow("📍 Offset:", QLabel(f"0x{result.offset:X} ({result.offset})"))
+        
+        # สร้าง labels ที่มีสีเข้ม
+        file_label = QLabel("📁 File:")
+        file_label.setStyleSheet("font-weight: 700; color: #2c3e50; font-size: 12px;")
+        file_value = QLabel(result.file_path)
+        file_value.setStyleSheet("font-weight: 600; color: #34495e; font-size: 11px;")
+        info_layout.addRow(file_label, file_value)
+        
+        offset_label = QLabel("📍 Offset:")
+        offset_label.setStyleSheet("font-weight: 700; color: #2c3e50; font-size: 12px;")
+        offset_value = QLabel(f"0x{result.offset:X} ({result.offset})")
+        offset_value.setStyleSheet("font-weight: 600; color: #e67e22; font-size: 11px;")
+        info_layout.addRow(offset_label, offset_value)
+        
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
         
         # Current value
         current_group = QGroupBox("🎯 Current Value")
+        current_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: 700;
+                color: #2c3e50;
+                border: 2px solid #27ae60;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 15px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+                font-weight: 700;
+                padding: 4px 8px;
+                background-color: white;
+                border-radius: 4px;
+            }
+        """)
         current_layout = QVBoxLayout()
         
         current_label = QLabel("Current value:")
+        current_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
+                padding: 5px 0px;
+            }
+        """)
         current_layout.addWidget(current_label)
         
         current_text = QLineEdit(result.match)
         current_text.setReadOnly(True)
-        current_text.setStyleSheet("background-color: #f8f9fa; font-family: monospace; font-size: 12px;")
+        current_text.setStyleSheet("""
+            QLineEdit {
+                background-color: #f8f9fa; 
+                font-family: monospace; 
+                font-size: 12px;
+                font-weight: 600;
+                color: #2c3e50;
+                border: 2px solid #dee2e6;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
         current_layout.addWidget(current_text)
         
         current_group.setLayout(current_layout)
@@ -1645,9 +1954,36 @@ class PatternSearchDialog(QDialog):
         
         # New value input
         new_group = QGroupBox("✏️ New Value")
+        new_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: 700;
+                color: #2c3e50;
+                border: 2px solid #f39c12;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 15px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+                font-weight: 700;
+                padding: 4px 8px;
+                background-color: white;
+                border-radius: 4px;
+            }
+        """)
         new_layout = QVBoxLayout()
         
         new_label = QLabel("Enter new value:")
+        new_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                font-weight: 700;
+                color: #2c3e50;
+                padding: 5px 0px;
+            }
+        """)
         new_layout.addWidget(new_label)
         
         new_text = QLineEdit(result.match)
@@ -1660,6 +1996,11 @@ class PatternSearchDialog(QDialog):
                 font-family: monospace;
                 font-size: 12px;
                 font-weight: bold;
+                color: #1a1a1a;
+            }
+            QLineEdit:focus {
+                border-color: #e0a800;
+                color: #000000;
             }
         """)
         new_text.selectAll()  # Select all text for easy editing
@@ -1670,13 +2011,43 @@ class PatternSearchDialog(QDialog):
         
         # Context preview
         context_group = QGroupBox("📝 Context Preview")
+        context_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: 700;
+                color: #2c3e50;
+                border: 2px solid #9b59b6;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 15px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+                font-weight: 700;
+                padding: 4px 8px;
+                background-color: white;
+                border-radius: 4px;
+            }
+        """)
         context_layout = QVBoxLayout()
         
         context_text = QTextEdit()
         context_text.setPlainText(result.context)
         context_text.setReadOnly(True)
         context_text.setMaximumHeight(100)
-        context_text.setStyleSheet("background-color: #f8f9fa; font-family: monospace; font-size: 11px;")
+        context_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa; 
+                font-family: monospace; 
+                font-size: 11px;
+                font-weight: 600;
+                color: #2c3e50;
+                border: 2px solid #dee2e6;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
         context_layout.addWidget(context_text)
         
         context_group.setLayout(context_layout)
@@ -1692,10 +2063,13 @@ class PatternSearchDialog(QDialog):
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
+                padding: 10px 20px;
+                font-weight: 700;
+                font-size: 12px;
             }
-            QPushButton:hover { background-color: #218838; }
+            QPushButton:hover { 
+                background-color: #218838; 
+            }
         """)
 
         cancel_btn = QPushButton("❌ Cancel")
@@ -1705,10 +2079,13 @@ class PatternSearchDialog(QDialog):
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
+                padding: 10px 20px;
+                font-weight: 700;
+                font-size: 12px;
             }
-            QPushButton:hover { background-color: #5a6268; }
+            QPushButton:hover { 
+                background-color: #5a6268; 
+            }
         """)
 
         button_layout.addWidget(save_btn)
@@ -1807,6 +2184,50 @@ class PatternSearchDialog(QDialog):
 
 
     
+    def browse_target(self):
+        """เปิด dialog ให้เลือกไฟล์หรือโฟลเดอร์ใหม่"""
+        # ให้เลือกว่าจะเลือกไฟล์หรือโฟลเดอร์
+        reply = QMessageBox.question(
+            self, "Select Target Type",
+            "Choose target type for pattern search:\n\n"
+            "📁 Folder - Search in multiple files\n"
+            "📄 Single File - Search in one specific file",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes
+        )
+        
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+            
+        new_target = None
+        
+        if reply == QMessageBox.StandardButton.Yes:  # เลือกโฟลเดอร์
+            new_target = QFileDialog.getExistingDirectory(
+                self,
+                "Select Folder to Search",
+                self.target_path if os.path.exists(self.target_path) else os.getcwd()
+            )
+        else:  # เลือกไฟล์
+            new_target, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select File to Search",
+                self.target_path if os.path.exists(self.target_path) else os.getcwd(),
+                "Firmware Files (*.bin *.img *.fw *.rom);;Text Files (*.txt *.cfg *.conf);;All Files (*)"
+            )
+        
+        if new_target and os.path.exists(new_target):
+            self.target_path = new_target
+            self.path_info.setText(f"📁 Search Location: {self.target_path}")
+            
+            # อัปเดต window title
+            self.setWindowTitle(f"🔍 Enhanced Pattern Search - {os.path.basename(self.target_path)}")
+            
+            # ล้าง results เดิม
+            self.clear_results()
+            
+            QMessageBox.information(self, "Target Updated", 
+                                  f"Search target updated to:\n{self.target_path}")
+
     def export_results(self):
         """Export results เป็นไฟล์"""
         if not self.results:
