@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pattern Search Toolkit - Standalone Application
+Cs4 PStoolkit Yak - Standalone Application
 Advanced Pattern Search & Replace Tool for Firmware Files
 """
 
@@ -21,7 +21,7 @@ from core.pattern_engine import PatternSearchDialog
 from ui_theme import apply_theme
 
 class PatternSearchApp(QMainWindow):
-    """Main application window for Pattern Search Toolkit"""
+    """Main application window for Cs4 PStoolkit Yak"""
     
     def __init__(self):
         super().__init__()
@@ -31,7 +31,7 @@ class PatternSearchApp(QMainWindow):
         
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("🔍 Pattern Search Toolkit")
+        self.setWindowTitle("🔍 Cs4 PStoolkit Yak")
         self.setGeometry(100, 100, 600, 400)
         
         # Set window icon if available
@@ -47,7 +47,7 @@ class PatternSearchApp(QMainWindow):
         layout.setContentsMargins(40, 40, 40, 40)
         
         # Title
-        title = QLabel("🔍 Pattern Search Toolkit")
+        title = QLabel("🔍 Cs4 PStoolkit Yak")
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Arial", 24, QFont.Bold))
         title.setStyleSheet("""
@@ -227,7 +227,7 @@ class PatternSearchApp(QMainWindow):
 def main():
     """Main application entry point"""
     app = QApplication(sys.argv)
-    app.setApplicationName("Pattern Search Toolkit")
+    app.setApplicationName("Cs4 PStoolkit Yak")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Firmware Tools")
     
